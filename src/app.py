@@ -487,7 +487,7 @@ async def main():
                 info += f" [тип: {chat_info[dest_id]['type']}]"
             dest_info.append(info)
 
-    print(f"Из чата {source_id}{source_info} в чаты: {', '.join(dest_info)}")
+        print(f"Из чата {source_id}{source_info} в чаты: {', '.join(dest_info)}")
 
     # Держим бота запущенным до нажатия Ctrl+C
     await idle()
