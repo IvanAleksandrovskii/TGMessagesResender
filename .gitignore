@@ -1,0 +1,9 @@
+.idea/
+.vscode/
+.venv/
+**/__pycache__/
+.env
+forward_config.json
+message_forwarder_bot.session
+message_forwarder_bot.session-journal
+my_account.session
