@@ -1,0 +1,17 @@
+services:
+  telegram-forwarder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+    env_file:
+      - .env # Можно использовать переменные докера, все равно
+    restart: unless-stopped # Возможно стоит заменить на always (( ! ))
+    command: /app/start.sh
+
+    stdin_open: true # аналог ключа -i
+    tty: true # аналог ключа -t
+
+volumes:
+  data:

@@ -2,8 +2,11 @@
 .vscode/
 .venv/
 **/__pycache__/
+
+# Config files
 .env
 forward_config.json
-message_forwarder_bot.session
-message_forwarder_bot.session-journal
-my_account.session
+
+# Pyrogram session files
+*.session
+*.session-journal
