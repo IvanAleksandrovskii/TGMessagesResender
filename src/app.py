@@ -2,10 +2,12 @@
 
 import asyncio
 import json
+import traceback
+
 from pyrogram import filters
 from pyrogram.handlers import MessageHandler
-
 from pyrogram.enums import ChatType
+from pyrogram.errors import FloodWait
 
 from .client import app
 from .config import settings
@@ -184,6 +186,7 @@ def load_saved_config():
         return False, {}
 
 
+'''
 # Функция для пересылки сообщений
 async def forward_message(client, message, chat_info=None):
     """
@@ -262,6 +265,114 @@ async def forward_message(client, message, chat_info=None):
                         )
                 except Exception as e2:
                     print(f"Не удалось восстановить доступ к чату {dest_chat_id}: {e2}")
+'''
+
+# Функция для пересылки сообщений c антифлудом
+async def forward_message(client, message, chat_info=None):
+    """
+    Обрабатывает входящие сообщения и пересылает их в указанные чаты.
+    Использует информацию о чате (USERNAME и пр.), если есть.
+    Также обрабатывает FloodWait, чтобы не отправлять сообщения слишком быстро.
+    """
+    # Получаем ID чата, из которого пришло сообщение
+    source_chat_id = message.chat.id
+
+    # Игнорируем собственные сообщения (если бот запущен под тем же аккаунтом)
+    if message.from_user and message.from_user.id == client.me.id:
+        print(f"Сообщение в {source_chat_id} проигнорировано (собственное сообщение).")
+        return
+
+    # Проверяем, настроена ли пересылка из этого чата
+    if source_chat_id in FORWARDING_CONFIG:
+        destination_chat_ids = FORWARDING_CONFIG[source_chat_id]
+
+        for dest_chat_id in destination_chat_ids:
+            # Попробуем узнать «целевой» чат (используем username, если есть в chat_info)
+            target_chat = dest_chat_id
+            if (
+                chat_info
+                and dest_chat_id in chat_info
+                and "username" in chat_info[dest_chat_id]
+            ):
+                target_chat = chat_info[dest_chat_id]["username"]
+                print(
+                    f"Используем username @{target_chat} для доступа к чату {dest_chat_id}"
+                )
+
+            try:
+                # Первая попытка пересылки
+                await message.forward(target_chat)
+                print(f"Сообщение из {source_chat_id} переслано в {dest_chat_id}")
+
+            except FloodWait as fw:
+                # Обработка «флуда»: Telegram просит подождать fw.value секунд
+                print(
+                    f"FloodWait: нужно подождать {fw.value} секунд, чтобы продолжить."
+                )
+                await asyncio.sleep(fw.value)
+
+                # После ожидания повторная попытка пересылки
+                try:
+                    await message.forward(target_chat)
+                    print(
+                        f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (после FloodWait)."
+                    )
+                except Exception as e2:
+                    print(f"Ошибка при повторной пересылке в {dest_chat_id}: {e2}")
+
+            except Exception as e:
+                # Прочие ошибки (включая недоступность чата, неправильный username, и т.д.)
+                print(f"Ошибка при пересылке сообщения в {dest_chat_id}: {e}")
+                print(traceback.format_exc())
+
+                # ---- Попытка fallback-доступа к чату ----
+                try:
+                    # Если это групповая/супергруппа с отрицательным ID — пробуем искать в get_dialogs
+                    if dest_chat_id < 0:
+                        print(
+                            f"Пробуем найти группу {dest_chat_id} в списке диалогов..."
+                        )
+                        found = False
+                        async for dialog in client.get_dialogs():
+                            if dialog.chat.id == dest_chat_id:
+                                print(
+                                    f"Чат {dest_chat_id} найден в диалогах! Снова пересылаем..."
+                                )
+                                found = True
+                                await message.forward(dialog.chat.id)
+                                print(
+                                    f"Успешно переслали из {source_chat_id} в {dest_chat_id} (через диалоги)"
+                                )
+                                break
+                        if not found:
+                            print(f"Чат {dest_chat_id} так и не найден в диалогах.")
+                    else:
+                        # Для остальных (положительные ID) пробуем resolve_peer
+                        print(
+                            f"Пробуем resolve_peer для {dest_chat_id} и снова переслать..."
+                        )
+                        await client.resolve_peer(dest_chat_id)
+                        await message.forward(dest_chat_id)
+                        print(
+                            f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (после resolve_peer)."
+                        )
+
+                except FloodWait as fw2:
+                    # Если при fallback'е тоже словили FloodWait — ждём и снова пробуем
+                    print(f"FloodWait (fallback): ждём {fw2.value} сек.")
+                    await asyncio.sleep(fw2.value)
+                    try:
+                        # Последняя попытка
+                        await message.forward(dest_chat_id)
+                        print(
+                            f"Сообщение успешно переслано после дополнительного FloodWait (fallback)."
+                        )
+                    except Exception as e3:
+                        print(f"Снова ошибка при повторной пересылке (fallback): {e3}")
+
+                except Exception as e2:
+                    print(f"Не удалось восстановить доступ к чату {dest_chat_id}: {e2}")
+                    print(traceback.format_exc())
 
 
 # Функция для проверки и обновления доступа к чатам
