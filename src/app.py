@@ -214,9 +214,7 @@ async def main():
     has_config = load_saved_config()
 
     # Если конфигурация не найдена или пользователь хочет изменить её
-    if not has_config or input(
-        "Хотите настроить пересылку заново? (да/нет): "
-    ).lower() in ["да", "д", "yes", "y"]:
+    if not has_config:  # or input("Хотите настроить пересылку заново? (да/нет): ").lower() in ["да", "д", "yes", "y"]
         await interactive_setup()
 
     # Если нет настроенных чатов, завершаем работу
