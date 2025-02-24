@@ -7,7 +7,7 @@ import traceback
 from pyrogram import filters
 from pyrogram.handlers import MessageHandler
 from pyrogram.enums import ChatType
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, MessageIdInvalid
 
 from .client import app
 from .config import settings
@@ -267,6 +267,7 @@ async def forward_message(client, message, chat_info=None):
                     print(f"Не удалось восстановить доступ к чату {dest_chat_id}: {e2}")
 '''
 
+
 # Функция для пересылки сообщений c антифлудом
 async def forward_message(client, message, chat_info=None):
     """
@@ -303,6 +304,12 @@ async def forward_message(client, message, chat_info=None):
                 # Первая попытка пересылки
                 await message.forward(target_chat)
                 print(f"Сообщение из {source_chat_id} переслано в {dest_chat_id}")
+
+            except MessageIdInvalid:
+                print(
+                    f"Ошибка MESSAGE_ID_INVALID: сообщение удалено, пропускаем {source_chat_id}"
+                )
+                continue
 
             except FloodWait as fw:
                 # Обработка «флуда»: Telegram просит подождать fw.value секунд
