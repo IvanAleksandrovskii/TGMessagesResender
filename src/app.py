@@ -324,6 +324,11 @@ async def forward_message(client, message, chat_info=None):
                     print(
                         f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (после FloodWait)."
                     )
+                except MessageIdInvalid:
+                    print(
+                        f"Ошибка MESSAGE_ID_INVALID: сообщение удалено, пропускаем {source_chat_id}"
+                    )
+                    continue
                 except Exception as e2:
                     print(f"Ошибка при повторной пересылке в {dest_chat_id}: {e2}")
 
