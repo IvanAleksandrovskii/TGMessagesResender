@@ -10,7 +10,7 @@
 ! Важно, не использовать основной аккаунт Telegram, а создать новый просто для этого бота или тот, который не жалко потерять, userbot'ов иногда блокируют.
 
 ```bash
-docker compose run telegram-forwarder
+docker compose run --rm telegram-forwarder
 ```
 
 ## Повторная настройка
