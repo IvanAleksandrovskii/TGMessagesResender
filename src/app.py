@@ -76,14 +76,23 @@ async def interactive_setup():
         int(i.strip()) for i in source_input.split(",") if i.strip().isdigit()
     ]
 
+    selected_source_chats = (
+        {}
+    )  # Словарь для хранения информации о выбранных исходных чатах
+
     for idx in source_indexes:
         if idx in dialog_dict:
             chat_id = dialog_dict[idx]["id"]
+            chat_name = dialog_dict[idx]["name"]
             SOURCE_CHAT_IDS.append(chat_id)
+            selected_source_chats[chat_id] = {
+                "index": idx,
+                "name": chat_name,
+            }
 
             # Для каждого исходного чата выбираем чаты назначения
             print(
-                f"\nВыберите номера чатов, В которые нужно пересылать сообщения из {dialog_dict[idx]['name']} (введите номера через запятую):"
+                f"\nВыберите номера чатов, В которые нужно пересылать сообщения из {chat_name} (введите номера через запятую):"
             )
             dest_input = input("> ")
             dest_indexes = [
@@ -92,16 +101,16 @@ async def interactive_setup():
 
             dest_chat_ids = []
             for dest_idx in dest_indexes:
-                if (
-                    dest_idx in dialog_dict and dest_idx != idx
-                ):  # Проверяем, что не пересылаем в тот же чат
+                if dest_idx in dialog_dict:
                     dest_chat_id = dialog_dict[dest_idx]["id"]
-                    dest_chat_ids.append(dest_chat_id)
+                    # Check that we're not forwarding to the same chat by comparing actual chat IDs
+                    if dest_chat_id != chat_id:
+                        dest_chat_ids.append(dest_chat_id)
 
             if dest_chat_ids:
                 FORWARDING_CONFIG[chat_id] = dest_chat_ids
                 print(
-                    f"Пересылка из {dialog_dict[idx]['name']} настроена в {len(dest_chat_ids)} чат(ов)"
+                    f"Пересылка из {chat_name} настроена в {len(dest_chat_ids)} чат(ов)"
                 )
 
     # Выводим итоговую конфигурацию
