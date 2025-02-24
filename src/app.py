@@ -132,7 +132,7 @@ async def interactive_setup():
     # Сохраняем конфигурацию в файл для последующего использования
     save_config = input(
         "\nСохранить конфигурацию для будущих запусков? (да/нет): "
-    ).lower()
+    ).lower().strip()
     if save_config in ["да", "д", "yes", "y"]:
         config = {
             "SOURCE_CHAT_IDS": SOURCE_CHAT_IDS,
