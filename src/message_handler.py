@@ -2,25 +2,144 @@
 
 import asyncio
 
+from pyrogram import Client
 from pyrogram.errors import FloodWait, MessageIdInvalid
+from pyrogram.types import Message
 
 
-async def forward_message(client, message, chat_info=None):
+# Глобальный буфер для медиагрупп {media_group_id: {"messages": [...], "task": Task}}
+media_groups_buffer = {}
+
+
+async def fallback_copy(client: Client, message: Message, dest_chat_id, prefix: str):
     """
-    Обрабатывает входящие сообщения и пересылает их в указанные чаты.
-    Приоритетно использует forward вместо copy для обычных сообщений.
-    Сохраняет медиагруппы и прикрепленные файлы в исходном виде.
-    Также обрабатывает FloodWait, чтобы не отправлять сообщения слишком быстро.
+    Резервный метод копирования сообщения, если пересылка (forward) не удалась.
+    Поддерживает одиночные сообщения и медиагруппы (copy_media_group).
     """
-    # Получаем глобальные переменные для конфигурации
-    from .app import FORWARDING_CONFIG
+    try:
+        # Если у сообщения есть media_group_id, пробуем копировать как альбом
+        if message.media_group_id is not None:
+            try:
+                await client.copy_media_group(
+                    chat_id=dest_chat_id,
+                    from_chat_id=message.chat.id,
+                    message_id=message.id,
+                )
+                print(f"[fallback_copy] Медиагруппа скопирована в {dest_chat_id}")
+                return
+            except Exception as e:
+                print(f"[fallback_copy] Ошибка при copy_media_group: {e}")
+                # Если copy_media_group не сработал, пробуем копировать по одному
 
-    # Получаем ID чата, из которого пришло сообщение
+        # Если это одиночное сообщение (или copy_media_group не получилось)
+        if message.text:
+            await message.copy(dest_chat_id, text=prefix + message.text)
+        elif message.caption:
+            await message.copy(dest_chat_id, caption=prefix + message.caption)
+        else:
+            await message.copy(dest_chat_id, caption=prefix if message.media else None)
+
+        print(
+            f"[fallback_copy] Сообщение(я) скопировано в {dest_chat_id} (резервный метод)."
+        )
+
+    except Exception as e:
+        print(f"[fallback_copy] Не удалось скопировать сообщение в {dest_chat_id}: {e}")
+
+
+async def process_media_group_with_delay(
+    client: Client,
+    mg_id: str,
+    source_chat_id: int,
+    chat_info: dict,
+    prefix: str,
+    delay: float = 1.0,
+):
+    """
+    Отложенная пересылка медиагруппы: ждём небольшую паузу, затем отправляем
+    весь альбом «одним блоком» (forward_messages) во все чаты из FORWARDING_CONFIG.
+    """
+    from .app import FORWARDING_CONFIG  # ваш глобальный конфиг
+
+    await asyncio.sleep(delay)
+
+    # Забираем накопленные сообщения из буфера
+    group_data = media_groups_buffer.pop(mg_id, None)
+    if not group_data:
+        return  # Кто-то уже забрал или очистил
+
+    messages = group_data["messages"]
+    if not messages:
+        return
+
+    # Сортируем по ID, чтобы сохранить исходный порядок
+    messages.sort(key=lambda m: m.id)
+
+    # Все ID сообщений в группе
+    message_ids = [m.id for m in messages]
+
+    # Определяем, в какие чаты нужно пересылать
+    if source_chat_id not in FORWARDING_CONFIG:
+        # Не настроена пересылка
+        return
+    dest_chat_ids = set(FORWARDING_CONFIG[source_chat_id])
+
+    # Пересылаем альбом в каждый чат-получатель
+    for dest_chat_id in dest_chat_ids:
+        try:
+            await client.forward_messages(
+                chat_id=dest_chat_id,
+                from_chat_id=source_chat_id,
+                message_ids=message_ids,
+            )
+            print(f"Медиагруппа {mg_id} переслана одним блоком в {dest_chat_id}.")
+        except FloodWait as fw:
+            print(
+                f"FloodWait при отправке медиагруппы {mg_id} -> {dest_chat_id}: ждём {fw.value} секунд."
+            )
+            await asyncio.sleep(fw.value)
+            try:
+                await client.forward_messages(
+                    chat_id=dest_chat_id,
+                    from_chat_id=source_chat_id,
+                    message_ids=message_ids,
+                )
+                print(
+                    f"Медиагруппа {mg_id} переслана в {dest_chat_id} (после FloodWait)."
+                )
+            except Exception as e:
+                print(
+                    f"Ошибка после FloodWait (медиагруппа {mg_id} -> {dest_chat_id}): {e}, резервный метод."
+                )
+                # Берём «якорное» сообщение, чтобы fallback_copy понимать что копировать
+                anchor_message = messages[0]
+                await fallback_copy(client, anchor_message, dest_chat_id, prefix)
+        except MessageIdInvalid:
+            print(
+                f"[MediaGroup] MESSAGE_ID_INVALID для {mg_id}, сообщение удалено или недоступно."
+            )
+        except Exception as e:
+            print(
+                f"Ошибка при пересылке медиагруппы {mg_id} -> {dest_chat_id}: {e}, резервный метод."
+            )
+            anchor_message = messages[0]
+            await fallback_copy(client, anchor_message, dest_chat_id, prefix)
+
+
+async def forward_message(client: Client, message: Message, chat_info=None):
+    """
+    Обработчик входящих сообщений с поддержкой:
+    - медиагрупп (отправка альбомом),
+    - FloodWait,
+    - fallback-копирования (если forward не доступен),
+    - множественных чатов назначения из FORWARDING_CONFIG.
+    """
+    from .app import FORWARDING_CONFIG  # Ваш глобальный конфиг с пересылками
+
     source_chat_id = message.chat.id
+    print(f"Получено сообщение из чата {source_chat_id}")
 
-    print(f"Получено сообщение из чата {source_chat_id}: {message.text}")
-
-    # Игнорируем собственные сообщения (если бот запущен под тем же аккаунтом)
+    # Игнорируем собственные сообщения бота (если бот работает от аккаунта, а не Bot API)
     if message.from_user and message.from_user.id == client.me.id:
         print(f"Сообщение в {source_chat_id} проигнорировано (собственное сообщение).")
         return
@@ -29,308 +148,71 @@ async def forward_message(client, message, chat_info=None):
     if source_chat_id not in FORWARDING_CONFIG:
         return
 
-    # Получаем информацию об исходном чате для префикса
+    # Для fallback-копирования формируем префикс
     source_chat_info = ""
-    source_chat_link = ""
-
     if chat_info and source_chat_id in chat_info:
+        # например, chat_info[123123] = {"username": "some_channel", "type": "channel"}
         if "username" in chat_info[source_chat_id]:
-            source_chat_link = f"https://t.me/{chat_info[source_chat_id]['username']}"
             source_chat_info = f"@{chat_info[source_chat_id]['username']}"
-        if "type" in chat_info[source_chat_id]:
-            chat_type = chat_info[source_chat_id]["type"]
-            # Дополняем информацию типом чата
-            if not source_chat_info:
-                source_chat_info = f"{chat_type} {source_chat_id}"
-            else:
-                source_chat_info += f" ({chat_type})"
+        elif "type" in chat_info[source_chat_id]:
+            source_chat_info = f"{chat_info[source_chat_id]['type']} {source_chat_id}"
 
     if not source_chat_info:
-        # Если нет информации в chat_info, используем простой идентификатор
         source_chat_info = f"Чат {source_chat_id}"
 
-    # Префикс для случаев, когда нужно скопировать сообщение
-    prefix = f"📨 Переслано из: {source_chat_info}"
-    if source_chat_link:
-        prefix += f" [{source_chat_link}]"
-    prefix += "\n\n"
+    prefix = f"📨 Переслано из: {source_chat_info}\n\n"
 
-    # Проверяем, является ли сообщение частью медиагруппы
-    if message.media_group_id is not None:
-        # Инициализируем отслеживание медиагрупп, если это не было сделано
-        if not hasattr(client, "_processed_media_groups"):
-            client._processed_media_groups = {}
+    # Если у сообщения есть media_group_id — обрабатываем как часть альбома
+    if message.media_group_id:
+        mg_id = message.media_group_id
 
-        # Если этой медиагруппы нет в словаре - добавляем с временной меткой
-        if message.media_group_id not in client._processed_media_groups:
-            # Добавляем ID сообщения, которое будет использоваться как якорь
-            client._processed_media_groups[message.media_group_id] = {
-                "timestamp": asyncio.get_event_loop().time(),
-                "anchor_message_id": message.id,
-                "processed_chats": set(),  # Множество чатов, в которые уже отправили
-            }
+        # Если в буфере ещё нет этой группы - создаём
+        if mg_id not in media_groups_buffer:
+            media_groups_buffer[mg_id] = {"messages": [], "task": None}
 
-            # Очистка старых медиагрупп (старше 10 минут)
-            current_time = asyncio.get_event_loop().time()
-            for mg_id in list(client._processed_media_groups.keys()):
-                if (
-                    current_time - client._processed_media_groups[mg_id]["timestamp"]
-                    > 600
-                ):  # 10 минут
-                    del client._processed_media_groups[mg_id]
+        media_groups_buffer[mg_id]["messages"].append(message)
 
-            print(f"Новая медиагруппа {message.media_group_id}, якорь: {message.id}")
-        else:
-            # Если эта медиагруппа уже обрабатывается, просто возвращаемся
-            print(
-                f"Пропуск повторного сообщения из медиагруппы {message.media_group_id}"
-            )
-            return
-
-    destination_chat_ids = FORWARDING_CONFIG[source_chat_id]
-    # Используем сет для уникальности чатов назначения
-    unique_dest_ids = set(destination_chat_ids)
-
-    # Обрабатываем пересылку для каждого чата назначения
-    for dest_chat_id in unique_dest_ids:
-        # Если это медиагруппа и мы уже отправили её в этот чат - пропускаем
-        if (
-            message.media_group_id is not None
-            and dest_chat_id
-            in client._processed_media_groups[message.media_group_id]["processed_chats"]
-        ):
-            print(
-                f"Медиагруппа {message.media_group_id} уже отправлена в чат {dest_chat_id}, пропускаем"
-            )
-            continue
-
-        # Создаем список возможных вариантов доступа к чату - сначала предпочтительный
-        access_methods = []
-
-        # Определяем лучший способ доступа к чату (username или ID)
-        if (
-            chat_info
-            and dest_chat_id in chat_info
-            and "username" in chat_info[dest_chat_id]
-        ):
-            username = "@" + chat_info[dest_chat_id]["username"]
-            access_methods = [
-                username,
-                dest_chat_id,
-            ]  # Сначала пробуем username, потом ID
-            print(f"Используем username {username} для доступа к чату {dest_chat_id}")
-        else:
-            access_methods = [dest_chat_id]  # Только ID
-
-        # Пробуем разные методы доступа, до первого успешного
-        success = False
-        for target_chat in access_methods:
-            try:
-                # Обработка медиагруппы
-                if message.media_group_id is not None:
-                    anchor_id = client._processed_media_groups[message.media_group_id][
-                        "anchor_message_id"
-                    ]
-
-                    # Для медиагрупп всегда используем copy_media_group
-                    await client.copy_media_group(
-                        chat_id=target_chat,
-                        from_chat_id=source_chat_id,
-                        message_id=anchor_id,
-                    )
-
-                    # Отмечаем, что в этот чат медиагруппа уже отправлена
-                    client._processed_media_groups[message.media_group_id][
-                        "processed_chats"
-                    ].add(dest_chat_id)
-
-                    print(
-                        f"Медиагруппа из {source_chat_id} скопирована в {dest_chat_id}"
-                    )
-                else:
-                    # Для обычных сообщений сначала пробуем forward (пересылку)
-                    try:
-                        await message.forward(target_chat)
-                        print(
-                            f"Сообщение из {source_chat_id} переслано в {dest_chat_id}"
-                        )
-                        success = True
-                        break
-                    except Exception as fwd_err:
-                        print(
-                            f"Ошибка при пересылке в {dest_chat_id}: {fwd_err}, пробуем копирование"
-                        )
-
-                        # Если пересылка не сработала - копируем с префиксом
-                        if message.text:
-                            # Для текстовых сообщений добавляем префикс
-                            await message.copy(
-                                target_chat,
-                                caption=prefix + (message.text or ""),
-                                text=prefix + (message.text or ""),
-                            )
-                        elif message.caption:
-                            # Для медиафайлов с подписью добавляем префикс к подписи
-                            await message.copy(
-                                target_chat, caption=prefix + message.caption
-                            )
-                        else:
-                            # Для остальных просто копируем
-                            await message.copy(
-                                target_chat, caption=prefix if message.media else None
-                            )
-
-                        print(
-                            f"Сообщение из {source_chat_id} скопировано в {dest_chat_id} с префиксом"
-                        )
-
-                success = True
-                break  # Прерываем цикл после успешной пересылки
-            except MessageIdInvalid:
-                print(
-                    f"Ошибка MESSAGE_ID_INVALID: сообщение удалено, пропускаем {source_chat_id}"
+        # Если нет запущенной задачи на отправку альбома, создаём её
+        if media_groups_buffer[mg_id]["task"] is None:
+            media_groups_buffer[mg_id]["task"] = asyncio.create_task(
+                process_media_group_with_delay(
+                    client=client,
+                    mg_id=mg_id,
+                    source_chat_id=source_chat_id,
+                    chat_info=chat_info,
+                    prefix=prefix,
                 )
-                success = True  # Считаем это успехом, т.к. дальнейшие попытки не нужны
-                break
-            except FloodWait as fw:
-                print(f"FloodWait: нужно подождать {fw.value} секунд")
-                await asyncio.sleep(fw.value)
-                # После ожидания повторная попытка с тем же методом
-                try:
-                    if message.media_group_id is not None:
-                        anchor_id = client._processed_media_groups[
-                            message.media_group_id
-                        ]["anchor_message_id"]
-                        await client.copy_media_group(
-                            chat_id=target_chat,
-                            from_chat_id=source_chat_id,
-                            message_id=anchor_id,
-                        )
-                        client._processed_media_groups[message.media_group_id][
-                            "processed_chats"
-                        ].add(dest_chat_id)
-                        print(
-                            f"Медиагруппа из {source_chat_id} скопирована в {dest_chat_id} (после FloodWait)"
-                        )
-                    else:
-                        # После FloodWait сначала пробуем пересылку
-                        try:
-                            await message.forward(target_chat)
-                            print(
-                                f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (после FloodWait)"
-                            )
-                        except Exception as fwd_err:
-                            print(
-                                f"Ошибка при пересылке после FloodWait: {fwd_err}, пробуем копирование"
-                            )
+            )
 
-                            # Если пересылка не сработала - копируем с префиксом
-                            if message.text:
-                                await message.copy(
-                                    target_chat, text=prefix + message.text
-                                )
-                            elif message.caption:
-                                await message.copy(
-                                    target_chat, caption=prefix + message.caption
-                                )
-                            else:
-                                await message.copy(
-                                    target_chat,
-                                    caption=prefix if message.media else None,
-                                )
+        # Возвращаемся сразу, т.к. отправка будет через задачу
+        return
 
-                            print(
-                                f"Сообщение из {source_chat_id} скопировано в {dest_chat_id} с префиксом (после FloodWait)"
-                            )
-
-                    success = True
-                    break
-                except MessageIdInvalid:
-                    print(
-                        f"Ошибка MESSAGE_ID_INVALID после FloodWait: сообщение удалено"
-                    )
-                    success = True  # Считаем это успехом
-                    break
-                except Exception as e:
-                    print(
-                        f"Ошибка при копировании в {dest_chat_id} через {target_chat}: {e}"
-                    )
-                    # Продолжаем со следующим методом
+    # Иначе — одиночное сообщение (без media_group_id). Пересылаем сразу в каждый чат
+    dest_chat_ids = set(FORWARDING_CONFIG[source_chat_id])
+    for dest_chat_id in dest_chat_ids:
+        try:
+            await message.forward(dest_chat_id)
+            print(f"Сообщение из {source_chat_id} переслано в {dest_chat_id}")
+        except FloodWait as fw:
+            print(f"FloodWait: ожидание {fw.value} секунд (одиночное сообщение)")
+            await asyncio.sleep(fw.value)
+            try:
+                await message.forward(dest_chat_id)
+                print(
+                    f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (после FloodWait)"
+                )
             except Exception as e:
                 print(
-                    f"Ошибка при копировании в {dest_chat_id} через {target_chat}: {e}"
+                    f"Ошибка после FloodWait (одиночное сообщение): {e}, резервный метод"
                 )
-                # Продолжаем со следующим методом
-
-        # Если все методы не сработали, пробуем найти чат через диалоги (только если не удалось переслать)
-        if not success:
-            print(f"Пробуем найти чат {dest_chat_id} в списке диалогов")
-            try:
-                found = False
-                async for dialog in client.get_dialogs():
-                    if dialog.chat.id == dest_chat_id:
-                        print(f"Чат {dest_chat_id} найден в диалогах")
-                        found = True
-                        try:
-                            if message.media_group_id is not None:
-                                anchor_id = client._processed_media_groups[
-                                    message.media_group_id
-                                ]["anchor_message_id"]
-                                await client.copy_media_group(
-                                    chat_id=dialog.chat.id,
-                                    from_chat_id=source_chat_id,
-                                    message_id=anchor_id,
-                                )
-                                client._processed_media_groups[message.media_group_id][
-                                    "processed_chats"
-                                ].add(dest_chat_id)
-                                print(
-                                    f"Медиагруппа из {source_chat_id} скопирована в {dest_chat_id} (через диалоги)"
-                                )
-                            else:
-                                # Через диалоги также сначала пробуем пересылку
-                                try:
-                                    await message.forward(dialog.chat.id)
-                                    print(
-                                        f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (через диалоги)"
-                                    )
-                                except Exception as fwd_err:
-                                    print(
-                                        f"Ошибка при пересылке через диалоги: {fwd_err}, пробуем копирование"
-                                    )
-
-                                    # Если пересылка не сработала - копируем с префиксом
-                                    if message.text:
-                                        await message.copy(
-                                            dialog.chat.id, text=prefix + message.text
-                                        )
-                                    elif message.caption:
-                                        await message.copy(
-                                            dialog.chat.id,
-                                            caption=prefix + message.caption,
-                                        )
-                                    else:
-                                        await message.copy(
-                                            dialog.chat.id,
-                                            caption=prefix if message.media else None,
-                                        )
-                                    print(
-                                        f"Сообщение из {source_chat_id} скопировано в {dest_chat_id} с префиксом (через диалоги)"
-                                    )
-
-                            break
-                        except MessageIdInvalid:
-                            print(
-                                f"Ошибка MESSAGE_ID_INVALID: сообщение удалено (при попытке через диалоги)"
-                            )
-                            break
-                        except Exception as e:
-                            print(f"Ошибка при копировании через диалоги: {e}")
-
-                if not found:
-                    print(f"Чат {dest_chat_id} не найден в диалогах")
-            except Exception as e:
-                print(f"Ошибка при поиске в диалогах: {e}")
+                await fallback_copy(client, message, dest_chat_id, prefix)
+        except MessageIdInvalid:
+            print(f"[Single] MESSAGE_ID_INVALID для сообщения {message.id}, удалено?")
+        except Exception as e:
+            print(
+                f"Ошибка при пересылке одиночного сообщения в {dest_chat_id}: {e}, резервный метод"
+            )
+            await fallback_copy(client, message, dest_chat_id, prefix)
 
 
 def create_handler(chat_info_data):
