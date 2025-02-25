@@ -8,7 +8,10 @@ from pyrogram.raw import functions
 from .client import app
 from .config import settings
 
+
+# Имя папки с чатами для пересылки
 DIR_NAME = settings.chats_folder_name
+# Имя файла с конфигурацией пересылки
 CONFIG_FILE = settings.bot_chats_config_file
 
 

@@ -190,7 +190,7 @@ def load_saved_config():
 async def forward_message(client, message, chat_info=None):
     """
     Обрабатывает входящие сообщения и пересылает их в указанные чаты.
-    Использует информацию о чате (USERNAME и пр.), если есть.
+    Сохраняет медиагруппы и прикрепленные файлы в исходном виде.
     Также обрабатывает FloodWait, чтобы не отправлять сообщения слишком быстро.
     """
     # Получаем ID чата, из которого пришло сообщение
@@ -204,85 +204,160 @@ async def forward_message(client, message, chat_info=None):
         return
 
     # Проверяем, настроена ли пересылка из этого чата
-    if source_chat_id in FORWARDING_CONFIG:
-        destination_chat_ids = FORWARDING_CONFIG[source_chat_id]
+    if source_chat_id not in FORWARDING_CONFIG:
+        return
 
-        # Для каждого чата назначения
-        for dest_chat_id in destination_chat_ids:
-            # Определяем лучший способ доступа к чату (username или ID)
-            target_chat = dest_chat_id
-            use_username = False
+    # Проверяем, является ли сообщение частью медиагруппы
+    if message.media_group_id is not None:
+        # Инициализируем отслеживание медиагрупп, если это не было сделано
+        if not hasattr(client, "_processed_media_groups"):
+            client._processed_media_groups = {}
 
-            if (
-                chat_info
-                and dest_chat_id in chat_info
-                and "username" in chat_info[dest_chat_id]
-            ):
-                target_chat = "@" + chat_info[dest_chat_id]["username"]
-                use_username = True
+        # Если этой медиагруппы нет в словаре - добавляем с временной меткой
+        if message.media_group_id not in client._processed_media_groups:
+            # Добавляем ID сообщения, которое будет использоваться как якорь
+            client._processed_media_groups[message.media_group_id] = {
+                "timestamp": asyncio.get_event_loop().time(),
+                "anchor_message_id": message.id,
+                "processed_chats": set(),  # Множество чатов, в которые уже отправили
+            }
+
+            # Очистка старых медиагрупп (старше 10 минут)
+            current_time = asyncio.get_event_loop().time()
+            for mg_id in list(client._processed_media_groups.keys()):
+                if (
+                    current_time - client._processed_media_groups[mg_id]["timestamp"]
+                    > 600
+                ):  # 10 минут
+                    del client._processed_media_groups[mg_id]
+
+            print(f"Новая медиагруппа {message.media_group_id}, якорь: {message.id}")
+        else:
+            # Если эта медиагруппа уже обрабатывается, просто возвращаемся
+            print(
+                f"Пропуск повторного сообщения из медиагруппы {message.media_group_id}"
+            )
+            return
+
+    destination_chat_ids = FORWARDING_CONFIG[source_chat_id]
+    # Используем сет для уникальности чатов назначения
+    unique_dest_ids = set(destination_chat_ids)
+
+    # Обрабатываем пересылку для каждого чата назначения
+    for dest_chat_id in unique_dest_ids:
+        # Если это медиагруппа и мы уже отправили её в этот чат - пропускаем
+        if (
+            message.media_group_id is not None
+            and dest_chat_id
+            in client._processed_media_groups[message.media_group_id]["processed_chats"]
+        ):
+            print(
+                f"Медиагруппа {message.media_group_id} уже отправлена в чат {dest_chat_id}, пропускаем"
+            )
+            continue
+
+        # Создаем список возможных вариантов доступа к чату - сначала предпочтительный
+        access_methods = []
+
+        # Определяем лучший способ доступа к чату (username или ID)
+        if (
+            chat_info
+            and dest_chat_id in chat_info
+            and "username" in chat_info[dest_chat_id]
+        ):
+            username = "@" + chat_info[dest_chat_id]["username"]
+            access_methods = [
+                username,
+                dest_chat_id,
+            ]  # Сначала пробуем username, потом ID
+            print(f"Используем username {username} для доступа к чату {dest_chat_id}")
+        else:
+            access_methods = [dest_chat_id]  # Только ID
+
+        # Пробуем разные методы доступа, до первого успешного
+        success = False
+        for target_chat in access_methods:
+            try:
+                # Обработка медиагруппы
+                if message.media_group_id is not None:
+                    anchor_id = client._processed_media_groups[message.media_group_id][
+                        "anchor_message_id"
+                    ]
+
+                    # Копируем всю медиагруппу через якорное сообщение
+                    await client.copy_media_group(
+                        chat_id=target_chat,
+                        from_chat_id=source_chat_id,
+                        message_id=anchor_id,
+                    )
+
+                    # Отмечаем, что в этот чат медиагруппа уже отправлена
+                    client._processed_media_groups[message.media_group_id][
+                        "processed_chats"
+                    ].add(dest_chat_id)
+
+                    print(
+                        f"Медиагруппа из {source_chat_id} скопирована в {dest_chat_id}"
+                    )
+                else:
+                    # Для обычных сообщений используем copy_message
+                    await message.copy(target_chat)
+                    print(f"Сообщение из {source_chat_id} скопировано в {dest_chat_id}")
+
+                success = True
+                break  # Прерываем цикл после успешной пересылки
+            except MessageIdInvalid:
                 print(
-                    f"Используем username {target_chat} для доступа к чату {dest_chat_id}"
+                    f"Ошибка MESSAGE_ID_INVALID: сообщение удалено, пропускаем {source_chat_id}"
                 )
-
-            # Функция для попытки пересылки с различными методами доступа
-            async def try_forward():
-                nonlocal target_chat, use_username
-
-                # Первая попытка - используем заданный метод доступа (username или ID)
+                success = True  # Считаем это успехом, т.к. дальнейшие попытки не нужны
+                break
+            except FloodWait as fw:
+                print(f"FloodWait: нужно подождать {fw.value} секунд")
+                await asyncio.sleep(fw.value)
+                # После ожидания повторная попытка с тем же методом
                 try:
-                    await message.forward(target_chat)
-                    print(f"Сообщение из {source_chat_id} переслано в {dest_chat_id}")
-                    return True
+                    if message.media_group_id is not None:
+                        anchor_id = client._processed_media_groups[
+                            message.media_group_id
+                        ]["anchor_message_id"]
+                        await client.copy_media_group(
+                            chat_id=target_chat,
+                            from_chat_id=source_chat_id,
+                            message_id=anchor_id,
+                        )
+                        client._processed_media_groups[message.media_group_id][
+                            "processed_chats"
+                        ].add(dest_chat_id)
+                        print(
+                            f"Медиагруппа из {source_chat_id} скопирована в {dest_chat_id} (после FloodWait)"
+                        )
+                    else:
+                        await message.copy(target_chat)
+                        print(
+                            f"Сообщение из {source_chat_id} скопировано в {dest_chat_id} (после FloodWait)"
+                        )
+                    success = True
+                    break
                 except MessageIdInvalid:
                     print(
-                        f"Ошибка MESSAGE_ID_INVALID: сообщение удалено, пропускаем {source_chat_id}"
+                        f"Ошибка MESSAGE_ID_INVALID после FloodWait: сообщение удалено"
                     )
-                    return False
-                except FloodWait as fw:
-                    print(f"FloodWait: нужно подождать {fw.value} секунд")
-                    await asyncio.sleep(fw.value)
-                    # После ожидания повторная попытка с тем же методом
-                    try:
-                        await message.forward(target_chat)
-                        print(
-                            f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (после FloodWait)"
-                        )
-                        return True
-                    except MessageIdInvalid:
-                        print(
-                            f"Ошибка MESSAGE_ID_INVALID после FloodWait: сообщение удалено"
-                        )
-                        return False
-                    except Exception:
-                        return False  # Продолжаем с альтернативными методами
+                    success = True  # Считаем это успехом
+                    break
                 except Exception as e:
-                    print(f"Ошибка при пересылке в {dest_chat_id}: {e}")
-                    return False  # Продолжаем с альтернативными методами
+                    print(
+                        f"Ошибка при копировании в {dest_chat_id} через {target_chat}: {e}"
+                    )
+                    # Продолжаем со следующим методом
+            except Exception as e:
+                print(
+                    f"Ошибка при копировании в {dest_chat_id} через {target_chat}: {e}"
+                )
+                # Продолжаем со следующим методом
 
-            # Первая попытка с исходным целевым чатом
-            if await try_forward():
-                continue  # Переходим к следующему чату назначения
-
-            # Вторая попытка - если использовали username, пробуем по ID и наоборот
-            if use_username:
-                print(f"Пробуем переслать по ID {dest_chat_id} вместо username")
-                target_chat = dest_chat_id
-                use_username = False
-            else:
-                # Если есть username в chat_info, но не использовали его
-                if (
-                    chat_info
-                    and dest_chat_id in chat_info
-                    and "username" in chat_info[dest_chat_id]
-                ):
-                    target_chat = "@" + chat_info[dest_chat_id]["username"]
-                    use_username = True
-                    print(f"Пробуем переслать по username {target_chat} вместо ID")
-
-            if await try_forward():
-                continue
-
-            # Третья попытка - попробуем найти чат через get_dialogs
+        # Если все методы не сработали, пробуем найти чат через диалоги (только если не удалось переслать)
+        if not success:
             print(f"Пробуем найти чат {dest_chat_id} в списке диалогов")
             try:
                 found = False
@@ -291,10 +366,26 @@ async def forward_message(client, message, chat_info=None):
                         print(f"Чат {dest_chat_id} найден в диалогах")
                         found = True
                         try:
-                            await message.forward(dialog.chat.id)
-                            print(
-                                f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (через диалоги)"
-                            )
+                            if message.media_group_id is not None:
+                                anchor_id = client._processed_media_groups[
+                                    message.media_group_id
+                                ]["anchor_message_id"]
+                                await client.copy_media_group(
+                                    chat_id=dialog.chat.id,
+                                    from_chat_id=source_chat_id,
+                                    message_id=anchor_id,
+                                )
+                                client._processed_media_groups[message.media_group_id][
+                                    "processed_chats"
+                                ].add(dest_chat_id)
+                                print(
+                                    f"Медиагруппа из {source_chat_id} скопирована в {dest_chat_id} (через диалоги)"
+                                )
+                            else:
+                                await message.copy(dialog.chat.id)
+                                print(
+                                    f"Сообщение из {source_chat_id} скопировано в {dest_chat_id} (через диалоги)"
+                                )
                             break
                         except MessageIdInvalid:
                             print(
@@ -302,7 +393,7 @@ async def forward_message(client, message, chat_info=None):
                             )
                             break
                         except Exception as e:
-                            print(f"Ошибка при пересылке через диалоги: {e}")
+                            print(f"Ошибка при копировании через диалоги: {e}")
 
                 if not found:
                     print(f"Чат {dest_chat_id} не найден в диалогах")
@@ -337,99 +428,64 @@ async def validate_chats():
 
     print(f"Загружено {len(cached_dialogs)} диалогов")
 
-    # Отслеживаем проблемные чаты
-    problematic_source_ids = []
-    problematic_dest_pairs = []
+    # Собираем все уникальные ID чатов, которые нужно проверить
+    all_chat_ids = set(SOURCE_CHAT_IDS)
+    for dest_ids in FORWARDING_CONFIG.values():
+        all_chat_ids.update(dest_ids)
 
-    # Проверяем исходные чаты
-    for source_id in SOURCE_CHAT_IDS:
-        if source_id in cached_dialogs:
-            print(f"Доступ к исходному чату {source_id} подтвержден (из кэша диалогов)")
+    # Отслеживаем проблемные чаты
+    problematic_chats = set()
+
+    # Проверяем все чаты за один проход
+    for chat_id in all_chat_ids:
+        if chat_id in cached_dialogs:
+            print(f"Доступ к чату {chat_id} подтвержден (из кэша диалогов)")
         else:
             try:
                 # Попытка получить информацию о чате напрямую, если его нет в диалогах
-                chat = await app.get_chat(source_id)
-                print(
-                    f"Доступ к исходному чату {source_id} подтвержден (прямой запрос)"
-                )
+                chat = await app.get_chat(chat_id)
+                print(f"Доступ к чату {chat_id} подтвержден (прямой запрос)")
 
                 # Сохраняем информацию о чате
                 if hasattr(chat, "username") and chat.username:
-                    chat_info[source_id] = {
+                    chat_info[chat_id] = {
                         "username": chat.username,
                         "type": str(chat.type.name),
                     }
                 else:
-                    chat_info[source_id] = {"type": str(chat.type.name)}
+                    chat_info[chat_id] = {"type": str(chat.type.name)}
             except Exception as e:
-                print(f"Ошибка доступа к исходному чату {source_id}: {e}")
-                problematic_source_ids.append(source_id)
+                print(f"Ошибка доступа к чату {chat_id}: {e}")
+                problematic_chats.add(chat_id)
 
-    # Проверяем чаты назначения
-    for source_id, dest_ids in FORWARDING_CONFIG.items():
-        for dest_id in dest_ids:
-            if dest_id in cached_dialogs:
-                print(
-                    f"Доступ к чату назначения {dest_id} подтвержден (из кэша диалогов)"
-                )
-            elif dest_id not in chat_info:  # Проверяем только если еще не подтвердили
-                try:
-                    # Попытка получить информацию о чате напрямую
-                    chat = await app.get_chat(dest_id)
-                    print(
-                        f"Доступ к чату назначения {dest_id} подтвержден (прямой запрос)"
-                    )
-
-                    # Сохраняем информацию о чате
-                    if hasattr(chat, "username") and chat.username:
-                        chat_info[dest_id] = {
-                            "username": chat.username,
-                            "type": str(chat.type.name),
-                        }
-                    else:
-                        chat_info[dest_id] = {"type": str(chat.type.name)}
-                except Exception as e:
-                    print(f"Ошибка доступа к чату назначения {dest_id}: {e}")
-                    problematic_dest_pairs.append((source_id, dest_id))
-
-    # Удаляем из списков проблемных те, что нашлись в кэше диалогов
-    problematic_source_ids = [
-        sid for sid in problematic_source_ids if sid not in cached_dialogs
-    ]
-    problematic_dest_pairs = [
-        (sid, did) for sid, did in problematic_dest_pairs if did not in cached_dialogs
-    ]
-
-    if problematic_source_ids:
-        print(f"Осталось недоступных исходных чатов: {len(problematic_source_ids)}")
-    if problematic_dest_pairs:
-        print(
-            f"Осталось недоступных пар чатов назначения: {len(problematic_dest_pairs)}"
-        )
+    if problematic_chats:
+        print(f"Найдено недоступных чатов: {len(problematic_chats)}")
 
     # Теперь обновляем конфигурацию на основе результатов
     # Удаляем недоступные исходные чаты
-    for source_id in problematic_source_ids:
-        if source_id in SOURCE_CHAT_IDS:
+    for source_id in list(SOURCE_CHAT_IDS):
+        if source_id in problematic_chats:
             SOURCE_CHAT_IDS.remove(source_id)
-        if source_id in FORWARDING_CONFIG:
-            del FORWARDING_CONFIG[source_id]
-            print(f"Чат {source_id} удален из конфигурации (недоступен)")
+            if source_id in FORWARDING_CONFIG:
+                del FORWARDING_CONFIG[source_id]
+                print(f"Чат {source_id} удален из конфигурации (недоступен)")
 
     # Удаляем недоступные чаты назначения
-    for source_id, dest_id in problematic_dest_pairs:
-        if source_id in FORWARDING_CONFIG and dest_id in FORWARDING_CONFIG[source_id]:
-            FORWARDING_CONFIG[source_id].remove(dest_id)
-            print(f"Чат назначения {dest_id} удален из конфигурации (недоступен)")
+    for source_id in list(FORWARDING_CONFIG.keys()):
+        dest_ids = FORWARDING_CONFIG[source_id]
+        for dest_id in list(dest_ids):
+            if dest_id in problematic_chats:
+                FORWARDING_CONFIG[source_id].remove(dest_id)
+                print(f"Чат назначения {dest_id} удален из конфигурации (недоступен)")
 
-            # Если у источника больше нет чатов назначения, удаляем его полностью
-            if not FORWARDING_CONFIG[source_id]:
-                del FORWARDING_CONFIG[source_id]
-                if source_id in SOURCE_CHAT_IDS:
-                    SOURCE_CHAT_IDS.remove(source_id)
-                print(
-                    f"Исходный чат {source_id} удален из конфигурации (нет доступных чатов назначения)"
-                )
+        # Если у источника больше нет чатов назначения, удаляем его полностью
+        if not FORWARDING_CONFIG[source_id]:
+            del FORWARDING_CONFIG[source_id]
+            if source_id in SOURCE_CHAT_IDS:
+                SOURCE_CHAT_IDS.remove(source_id)
+            print(
+                f"Исходный чат {source_id} удален из конфигурации (нет доступных чатов назначения)"
+            )
 
     # Сохраняем обновленную конфигурацию с информацией о чатах
     config = {
@@ -470,9 +526,14 @@ async def main():
         settings.chats_folder_name if hasattr(settings, "chats_folder_name") else False
     )
 
-    if use_folder and settings.interactive_folder_setup:
-        # Проверяем папку и настраиваем пересылку
-        folder_exists, folder_config, chat_info = await check_folder_existence()
+    chat_info = {}  # Инициализируем chat_info
+
+    # Проверяем, есть ли сохраненная конфигурация
+    has_config, chat_info = load_saved_config()
+
+    if use_folder and settings.interactive_folder_setup and not has_config:
+        # Проверяем папку и настраиваем пересылку только если нет сохранённой конфигурации
+        folder_exists, folder_config, folder_chat_info = await check_folder_existence()
 
         if not folder_exists:
             print(
@@ -484,24 +545,16 @@ async def main():
             await app.stop()
             return
 
-        # SOURCE_CHAT_IDS = list(folder_config.keys())
+        SOURCE_CHAT_IDS = list(folder_config.keys())
         FORWARDING_CONFIG = folder_config
-
-        # print("Текущие значения SOURCE_CHAT_IDS:", SOURCE_CHAT_IDS)
-        # print("Текущие значения FORWARDING_CONFIG:", FORWARDING_CONFIG)
-
-    # Стандартный режим без использования папки
-    # Проверяем, есть ли сохраненная конфигурация
-    has_config, chat_info = load_saved_config()
-
-    # Если конфигурация не найдена или пользователь хочет изменить её
-    if not has_config:
+        chat_info = folder_chat_info
+    elif not has_config:
+        # Если конфигурация не найдена и не используем папку - проводим интерактивную настройку
         await interactive_setup()
-        # После настройки обновляем информацию о чатах
-        chat_info = await validate_chats()
-    else:
-        # Проверяем и обновляем доступ к чатам перед запуском
-        chat_info = await validate_chats()
+
+    # Проверяем и обновляем доступ к чатам перед запуском
+    # Это обновит SOURCE_CHAT_IDS на основе FORWARDING_CONFIG
+    chat_info = await validate_chats()
 
     # Если нет настроенных чатов, завершаем работу
     if not SOURCE_CHAT_IDS or not FORWARDING_CONFIG:
