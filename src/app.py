@@ -206,227 +206,206 @@ async def forward_message(client, message, chat_info=None):
     if source_chat_id in FORWARDING_CONFIG:
         destination_chat_ids = FORWARDING_CONFIG[source_chat_id]
 
+        # Для каждого чата назначения
         for dest_chat_id in destination_chat_ids:
-            # Попробуем узнать «целевой» чат (используем username, если есть в chat_info)
+            # Определяем лучший способ доступа к чату (username или ID)
             target_chat = dest_chat_id
+            use_username = False
+
             if (
                 chat_info
                 and dest_chat_id in chat_info
                 and "username" in chat_info[dest_chat_id]
             ):
-                target_chat = chat_info[dest_chat_id]["username"]
+                target_chat = "@" + chat_info[dest_chat_id]["username"]
+                use_username = True
                 print(
-                    f"Используем username @{target_chat} для доступа к чату {dest_chat_id}"
+                    f"Используем username {target_chat} для доступа к чату {dest_chat_id}"
                 )
 
-            try:
-                # Первая попытка пересылки
-                await message.forward(target_chat)
-                print(f"Сообщение из {source_chat_id} переслано в {dest_chat_id}")
+            # Функция для попытки пересылки с различными методами доступа
+            async def try_forward():
+                nonlocal target_chat, use_username
 
-            except MessageIdInvalid:
-                print(
-                    f"Ошибка MESSAGE_ID_INVALID: сообщение удалено, пропускаем {source_chat_id}"
-                )
-                continue
-
-            except FloodWait as fw:
-                # Обработка «флуда»: Telegram просит подождать fw.value секунд
-                print(
-                    f"FloodWait: нужно подождать {fw.value} секунд, чтобы продолжить."
-                )
-                await asyncio.sleep(fw.value)
-
-                # После ожидания повторная попытка пересылки
+                # Первая попытка - используем заданный метод доступа (username или ID)
                 try:
                     await message.forward(target_chat)
-                    print(
-                        f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (после FloodWait)."
-                    )
+                    print(f"Сообщение из {source_chat_id} переслано в {dest_chat_id}")
+                    return True
                 except MessageIdInvalid:
                     print(
                         f"Ошибка MESSAGE_ID_INVALID: сообщение удалено, пропускаем {source_chat_id}"
                     )
-                    continue
-                except Exception as e2:
-                    print(f"Ошибка при повторной пересылке в {dest_chat_id}: {e2}")
-
-            except Exception as e:
-                # Прочие ошибки (включая недоступность чата, неправильный username, и т.д.)
-                print(f"Ошибка при пересылке сообщения в {dest_chat_id}: {e}")
-                print(traceback.format_exc())
-
-                # ---- Попытка fallback-доступа к чату ----
-                try:
-                    # Если это групповая/супергруппа с отрицательным ID — пробуем искать в get_dialogs
-                    if dest_chat_id < 0:
-                        print(
-                            f"Пробуем найти группу {dest_chat_id} в списке диалогов..."
-                        )
-                        found = False
-                        async for dialog in client.get_dialogs():
-                            if dialog.chat.id == dest_chat_id:
-                                print(
-                                    f"Чат {dest_chat_id} найден в диалогах! Снова пересылаем..."
-                                )
-                                found = True
-                                await message.forward(dialog.chat.id)
-                                print(
-                                    f"Успешно переслали из {source_chat_id} в {dest_chat_id} (через диалоги)"
-                                )
-                                break
-                        if not found:
-                            print(f"Чат {dest_chat_id} так и не найден в диалогах.")
-                    else:
-                        # Для остальных (положительные ID) пробуем resolve_peer
-                        print(
-                            f"Пробуем resolve_peer для {dest_chat_id} и снова переслать..."
-                        )
-                        await client.resolve_peer(dest_chat_id)
-                        await message.forward(dest_chat_id)
-                        print(
-                            f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (после resolve_peer)."
-                        )
-
-                except FloodWait as fw2:
-                    # Если при fallback'е тоже словили FloodWait — ждём и снова пробуем
-                    print(f"FloodWait (fallback): ждём {fw2.value} сек.")
-                    await asyncio.sleep(fw2.value)
+                    return False
+                except FloodWait as fw:
+                    print(f"FloodWait: нужно подождать {fw.value} секунд")
+                    await asyncio.sleep(fw.value)
+                    # После ожидания повторная попытка с тем же методом
                     try:
-                        # Последняя попытка
-                        await message.forward(dest_chat_id)
+                        await message.forward(target_chat)
                         print(
-                            f"Сообщение успешно переслано после дополнительного FloodWait (fallback)."
+                            f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (после FloodWait)"
                         )
-                    except Exception as e3:
-                        print(f"Снова ошибка при повторной пересылке (fallback): {e3}")
+                        return True
+                    except MessageIdInvalid:
+                        print(
+                            f"Ошибка MESSAGE_ID_INVALID после FloodWait: сообщение удалено"
+                        )
+                        return False
+                    except Exception:
+                        return False  # Продолжаем с альтернативными методами
+                except Exception as e:
+                    print(f"Ошибка при пересылке в {dest_chat_id}: {e}")
+                    return False  # Продолжаем с альтернативными методами
 
-                except Exception as e2:
-                    print(f"Не удалось восстановить доступ к чату {dest_chat_id}: {e2}")
-                    print(traceback.format_exc())
+            # Первая попытка с исходным целевым чатом
+            if await try_forward():
+                continue  # Переходим к следующему чату назначения
+
+            # Вторая попытка - если использовали username, пробуем по ID и наоборот
+            if use_username:
+                print(f"Пробуем переслать по ID {dest_chat_id} вместо username")
+                target_chat = dest_chat_id
+                use_username = False
+            else:
+                # Если есть username в chat_info, но не использовали его
+                if (
+                    chat_info
+                    and dest_chat_id in chat_info
+                    and "username" in chat_info[dest_chat_id]
+                ):
+                    target_chat = "@" + chat_info[dest_chat_id]["username"]
+                    use_username = True
+                    print(f"Пробуем переслать по username {target_chat} вместо ID")
+
+            if await try_forward():
+                continue
+
+            # Третья попытка - попробуем найти чат через get_dialogs
+            print(f"Пробуем найти чат {dest_chat_id} в списке диалогов")
+            try:
+                found = False
+                async for dialog in client.get_dialogs():
+                    if dialog.chat.id == dest_chat_id:
+                        print(f"Чат {dest_chat_id} найден в диалогах")
+                        found = True
+                        try:
+                            await message.forward(dialog.chat.id)
+                            print(
+                                f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (через диалоги)"
+                            )
+                            break
+                        except MessageIdInvalid:
+                            print(
+                                f"Ошибка MESSAGE_ID_INVALID: сообщение удалено (при попытке через диалоги)"
+                            )
+                            break
+                        except Exception as e:
+                            print(f"Ошибка при пересылке через диалоги: {e}")
+
+                if not found:
+                    print(f"Чат {dest_chat_id} не найден в диалогах")
+            except Exception as e:
+                print(f"Ошибка при поиске в диалогах: {e}")
 
 
+# Функция для проверки и обновления доступа к чатам
 # Функция для проверки и обновления доступа к чатам
 async def validate_chats():
     """
     Проверяет и восстанавливает доступность всех чатов в конфигурации,
-    с особым подходом к групповым чатам с отрицательными ID.
+    предварительно загружая список диалогов для более надежного доступа.
     """
     print("Проверка доступа к чатам...")
-
-    # Сначала проверим доступность всех чатов, не удаляя их сразу
-    problematic_source_ids = []
-    problematic_dest_pairs = []
 
     # Словарь для хранения информации о чатах
     chat_info = {}
 
+    # Сначала загружаем все диалоги для кэширования
+    print("Предварительная загрузка всех доступных диалогов...")
+    cached_dialogs = {}
+    async for dialog in app.get_dialogs():
+        cached_dialogs[dialog.chat.id] = dialog.chat
+        # Сохраняем информацию о чате
+        if hasattr(dialog.chat, "username") and dialog.chat.username:
+            chat_info[dialog.chat.id] = {
+                "username": dialog.chat.username,
+                "type": str(dialog.chat.type.name),
+            }
+        else:
+            chat_info[dialog.chat.id] = {"type": str(dialog.chat.type.name)}
+
+    print(f"Загружено {len(cached_dialogs)} диалогов")
+
+    # Отслеживаем проблемные чаты
+    problematic_source_ids = []
+    problematic_dest_pairs = []
+
     # Проверяем исходные чаты
     for source_id in SOURCE_CHAT_IDS:
-        try:
-            # Попытка получить информацию о чате (самый надежный, но медленный метод)
-            chat = await app.get_chat(source_id)
-            print(f"Доступ к исходному чату {source_id} подтвержден")
+        if source_id in cached_dialogs:
+            print(f"Доступ к исходному чату {source_id} подтвержден (из кэша диалогов)")
+        else:
+            try:
+                # Попытка получить информацию о чате напрямую, если его нет в диалогах
+                chat = await app.get_chat(source_id)
+                print(
+                    f"Доступ к исходному чату {source_id} подтвержден (прямой запрос)"
+                )
 
-            # Сохраняем дополнительную информацию о чате
-            # Преобразуем ChatType в строку для сериализации в JSON
-            if hasattr(chat, "username") and chat.username:
-                chat_info[source_id] = {
-                    "username": chat.username,
-                    "type": str(chat.type.name),
-                }
-            else:
-                chat_info[source_id] = {"type": str(chat.type.name)}
-
-        except Exception as e:
-            print(f"Ошибка доступа к исходному чату {source_id}: {e}")
-            problematic_source_ids.append(source_id)
+                # Сохраняем информацию о чате
+                if hasattr(chat, "username") and chat.username:
+                    chat_info[source_id] = {
+                        "username": chat.username,
+                        "type": str(chat.type.name),
+                    }
+                else:
+                    chat_info[source_id] = {"type": str(chat.type.name)}
+            except Exception as e:
+                print(f"Ошибка доступа к исходному чату {source_id}: {e}")
+                problematic_source_ids.append(source_id)
 
     # Проверяем чаты назначения
     for source_id, dest_ids in FORWARDING_CONFIG.items():
         for dest_id in dest_ids:
-            if dest_id not in chat_info:  # Проверяем только если еще не проверяли
+            if dest_id in cached_dialogs:
+                print(
+                    f"Доступ к чату назначения {dest_id} подтвержден (из кэша диалогов)"
+                )
+            elif dest_id not in chat_info:  # Проверяем только если еще не подтвердили
+                try:
+                    # Попытка получить информацию о чате напрямую
+                    chat = await app.get_chat(dest_id)
+                    print(
+                        f"Доступ к чату назначения {dest_id} подтвержден (прямой запрос)"
+                    )
 
-                if int(dest_id) < 0:  # Это групповой чат с отрицательным ID
+                    # Сохраняем информацию о чате
+                    if hasattr(chat, "username") and chat.username:
+                        chat_info[dest_id] = {
+                            "username": chat.username,
+                            "type": str(chat.type.name),
+                        }
+                    else:
+                        chat_info[dest_id] = {"type": str(chat.type.name)}
+                except Exception as e:
+                    print(f"Ошибка доступа к чату назначения {dest_id}: {e}")
                     problematic_dest_pairs.append((source_id, dest_id))
 
-                else:
-                    try:
-                        chat = await app.get_chat(dest_id)
-                        print(f"Доступ к чату назначения {dest_id} подтвержден")
+    # Удаляем из списков проблемных те, что нашлись в кэше диалогов
+    problematic_source_ids = [
+        sid for sid in problematic_source_ids if sid not in cached_dialogs
+    ]
+    problematic_dest_pairs = [
+        (sid, did) for sid, did in problematic_dest_pairs if did not in cached_dialogs
+    ]
 
-                        # Сохраняем дополнительную информацию о чате
-                        # Преобразуем ChatType в строку для сериализации в JSON
-                        if hasattr(chat, "username") and chat.username:
-                            chat_info[dest_id] = {
-                                "username": chat.username,
-                                "type": str(chat.type.name),
-                            }
-                        else:
-                            chat_info[dest_id] = {"type": str(chat.type.name)}
-
-                    except Exception as e:
-                        print(f"Ошибка доступа к чату назначения {dest_id}: {e}")
-                        problematic_dest_pairs.append((source_id, dest_id))
-
-    # Для проблемных групповых чатов с отрицательным ID используем специальный подход
-    for source_id in problematic_source_ids[:]:
-        if source_id < 0:  # Отрицательный ID - возможно, это группа
-            try:
-                # Попытка загрузить диалоги для поиска чата
-                print(f"Попытка найти группу с ID {source_id} через список диалогов...")
-                found = False
-
-                async for dialog in app.get_dialogs():
-                    if dialog.chat.id == source_id:
-                        print(f"Группа {source_id} найдена в диалогах!")
-                        found = True
-                        # Сохраняем информацию о чате (преобразуем тип в строку)
-                        if hasattr(dialog.chat, "username") and dialog.chat.username:
-                            chat_info[source_id] = {
-                                "username": dialog.chat.username,
-                                "type": str(dialog.chat.type.name),
-                            }
-                        else:
-                            chat_info[source_id] = {"type": str(dialog.chat.type.name)}
-                        break
-
-                if found:
-                    problematic_source_ids.remove(source_id)
-                else:
-                    print(f"Группа {source_id} не найдена в диалогах")
-            except Exception as e:
-                print(f"Ошибка при поиске группы {source_id} в диалогах: {e}")
-
-    # Проверяем и обрабатываем проблемные чаты назначения
-    for source_id, dest_id in problematic_dest_pairs[:]:
-        if dest_id < 0:  # Отрицательный ID - возможно, это группа
-            try:
-                print(
-                    f"Попытка найти группу назначения {dest_id} через список диалогов..."
-                )
-                found = False
-
-                async for dialog in app.get_dialogs():
-                    if dialog.chat.id == dest_id:
-                        print(f"Группа назначения {dest_id} найдена в диалогах!")
-                        found = True
-                        # Сохраняем информацию о чате (преобразуем тип в строку)
-                        if hasattr(dialog.chat, "username") and dialog.chat.username:
-                            chat_info[dest_id] = {
-                                "username": dialog.chat.username,
-                                "type": str(dialog.chat.type.name),
-                            }
-                        else:
-                            chat_info[dest_id] = {"type": str(dialog.chat.type.name)}
-
-                        problematic_dest_pairs.remove((source_id, dest_id))
-                        break
-
-                if not found:
-                    print(f"Группа назначения {dest_id} не найдена в диалогах")
-            except Exception as e:
-                print(f"Ошибка при поиске группы назначения {dest_id} в диалогах: {e}")
+    if problematic_source_ids:
+        print(f"Осталось недоступных исходных чатов: {len(problematic_source_ids)}")
+    if problematic_dest_pairs:
+        print(
+            f"Осталось недоступных пар чатов назначения: {len(problematic_dest_pairs)}"
+        )
 
     # Теперь обновляем конфигурацию на основе результатов
     # Удаляем недоступные исходные чаты
@@ -452,11 +431,11 @@ async def validate_chats():
                     f"Исходный чат {source_id} удален из конфигурации (нет доступных чатов назначения)"
                 )
 
-    # Сохраняем информацию о чатах для будущего использования
+    # Сохраняем обновленную конфигурацию с информацией о чатах
     config = {
         "SOURCE_CHAT_IDS": SOURCE_CHAT_IDS,
         "FORWARDING_CONFIG": FORWARDING_CONFIG,
-        "CHAT_INFO": chat_info,  # Новое поле с информацией о чатах
+        "CHAT_INFO": chat_info,
     }
 
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
