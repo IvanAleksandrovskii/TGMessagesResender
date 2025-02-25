@@ -1,6 +1,7 @@
 # src/check_folder.py
 
 import json
+import os
 
 from pyrogram.raw import functions
 from pyrogram.errors import FloodWait
@@ -16,10 +17,42 @@ async def check_folder_existence():
     """
     Проверяет существование папки с названием DIR_NAME в Telegram
     и извлекает из неё информацию о чатах для пересылки.
+    Если конфигурационный файл существует, использует его без запроса ввода.
 
     Returns:
         tuple: (существует_ли_папка, конфигурация_чатов, информация_о_чатах)
     """
+    # Проверяем наличие файла конфигурации
+    if os.path.exists(CONFIG_FILE):
+        try:
+            print(f"\n=== Найден файл конфигурации {CONFIG_FILE} ===")
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                config = json.load(f)
+
+            source_chat_ids = config.get("SOURCE_CHAT_IDS", [])
+            forwarding_config = config.get("FORWARDING_CONFIG", {})
+            chat_info = config.get("CHAT_INFO", {})
+
+            # Выводим загруженную конфигурацию
+            print("Загруженная конфигурация пересылки:")
+            for source_id, dest_ids in forwarding_config.items():
+                print(
+                    f"Из: Чат {source_id} -> В: {', '.join([f'Чат {dest_id}' for dest_id in dest_ids])}"
+                )
+
+            print(f"✅ Конфигурация загружена из файла {CONFIG_FILE}")
+            print(
+                "Для изменения конфигурации удалите файл или запустите с флагом --reconfigure"
+            )
+
+            return True, forwarding_config, chat_info
+        except Exception as e:
+            print(f"⚠️ Ошибка при чтении файла конфигурации: {str(e)}")
+            print("Продолжаем с настройкой через папку...")
+    else:
+        print(f"\n=== Файл конфигурации {CONFIG_FILE} не найден ===")
+        print("Продолжаем с настройкой через папку...")
+
     try:
         print("\n=== Проверка папки для пересылки сообщений ===")
         response = await app.invoke(functions.messages.GetDialogFilters())

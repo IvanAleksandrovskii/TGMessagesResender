@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import traceback
 
 from pyrogram import filters
 from pyrogram.handlers import MessageHandler
@@ -309,7 +308,6 @@ async def forward_message(client, message, chat_info=None):
                 print(f"Ошибка при поиске в диалогах: {e}")
 
 
-# Функция для проверки и обновления доступа к чатам
 # Функция для проверки и обновления доступа к чатам
 async def validate_chats():
     """
