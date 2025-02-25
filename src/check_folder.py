@@ -42,7 +42,7 @@ async def check_folder_existence():
 
             print(f"✅ Конфигурация загружена из файла {CONFIG_FILE}")
             print(
-                "Для изменения конфигурации удалите файл или запустите с флагом --reconfigure"
+                f"Для изменения конфигурации удалите файл {settings.bot_chats_config_file} и запустите бота снова."
             )
 
             return True, forwarding_config, chat_info
