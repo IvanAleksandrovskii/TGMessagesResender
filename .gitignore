@@ -10,3 +10,5 @@ forward_config.json
 # Pyrogram session files
 *.session
 *.session-journal
+
+**/__unused__/

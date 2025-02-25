@@ -11,6 +11,7 @@ from pyrogram.errors import FloodWait, MessageIdInvalid
 
 from .client import app
 from .config import settings
+from .check_folder import check_folder_existence
 
 
 # Файл с конфигурацией пересылки бота
@@ -184,88 +185,6 @@ def load_saved_config():
     except (FileNotFoundError, json.JSONDecodeError):
         print("Сохраненная конфигурация не найдена или повреждена")
         return False, {}
-
-
-'''
-# Функция для пересылки сообщений
-async def forward_message(client, message, chat_info=None):
-    """
-    Обрабатывает входящие сообщения и пересылает их в указанные чаты.
-    Использует информацию о чатах для более надежного доступа.
-
-    :param client: Экземпляр клиента Pyrogram
-    :param message: Объект сообщения
-    :param chat_info: Словарь с информацией о чатах
-    """
-    # Получаем ID чата, из которого пришло сообщение
-    source_chat_id = message.chat.id
-
-    # Игнорируем собственные сообщения
-    if message.from_user and message.from_user.id == client.me.id:
-        print(f"Сообщение в {source_chat_id} проигнорировано (собственное сообщение)")
-        return
-
-    # Проверяем, настроена ли пересылка из этого чата
-    if source_chat_id in FORWARDING_CONFIG:
-        # Получаем список чатов для пересылки
-        destination_chat_ids = FORWARDING_CONFIG[source_chat_id]
-
-        # Пересылаем сообщение в каждый чат из списка
-        for dest_chat_id in destination_chat_ids:
-            try:
-                # Используем информацию о чате для более надежного доступа
-                target_chat = dest_chat_id
-                if (
-                    chat_info
-                    and dest_chat_id in chat_info
-                    and "username" in chat_info[dest_chat_id]
-                ):
-                    # Используем username, если он доступен (часто работает лучше для групп)
-                    target_chat = chat_info[dest_chat_id]["username"]
-                    print(
-                        f"Используем username {target_chat} для доступа к чату {dest_chat_id}"
-                    )
-
-                # Пересылаем сообщение
-                await message.forward(target_chat)
-                print(f"Сообщение из {source_chat_id} переслано в {dest_chat_id}")
-            except Exception as e:
-                print(f"Ошибка при пересылке сообщения в {dest_chat_id}: {e}")
-                # Запись подробностей ошибки в лог для отладки
-                import traceback
-
-                print(traceback.format_exc())
-
-                # Попытка восстановить доступ к чату
-                try:
-                    # Многие групповые чаты не работают через resolve_peer, попробуем другие методы
-                    if dest_chat_id < 0:  # Это групповой чат с отрицательным ID
-                        print(f"Попытка найти чат {dest_chat_id} в диалогах...")
-                        found = False
-                        async for dialog in client.get_dialogs():
-                            if dialog.chat.id == dest_chat_id:
-                                print(f"Чат {dest_chat_id} найден в диалогах!")
-                                found = True
-                                # Повторяем пересылку
-                                await message.forward(dialog.chat.id)
-                                print(
-                                    f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (через диалоги)"
-                                )
-                                break
-
-                        if not found:
-                            print(f"Чат {dest_chat_id} не найден в диалогах")
-                    else:
-                        # Для обычных чатов пробуем стандартный метод
-                        await client.resolve_peer(dest_chat_id)
-                        # Повторяем пересылку
-                        await message.forward(dest_chat_id)
-                        print(
-                            f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (после resolve_peer)"
-                        )
-                except Exception as e2:
-                    print(f"Не удалось восстановить доступ к чату {dest_chat_id}: {e2}")
-'''
 
 
 # Функция для пересылки сообщений c антифлудом
@@ -547,6 +466,7 @@ async def validate_chats():
     return chat_info
 
 
+'''
 # Основная функция для запуска бота
 async def main():
     """
@@ -622,6 +542,108 @@ async def main():
         print(f"Из чата {source_id}{source_info} в чаты: {', '.join(dest_info)}")
 
     # Держим бота запущенным до нажатия Ctrl+C
+    await idle()
+
+    # Корректно останавливаем клиент при завершении работы
+    await app.stop()
+'''
+
+
+async def main():
+    """
+    Основная функция для запуска бота.
+    Настраивает обработчики и запускает клиент.
+    """
+    global SOURCE_CHAT_IDS, FORWARDING_CONFIG
+
+    print("Запуск бота для пересылки сообщений...")
+
+    # Запускаем клиент для настройки
+    await app.start()
+
+    # Проверяем наличие папки и настраиваем пересылку на её основе
+    use_folder = (
+        settings.chats_folder_name if hasattr(settings, "chats_folder_name") else False
+    )
+
+    if use_folder and settings.interactive_folder_setup:
+        # Проверяем папку и настраиваем пересылку
+        folder_exists, folder_config, chat_info = await check_folder_existence()
+
+        if not folder_exists:
+            print(
+                f"Для работы бота необходимо создать папку '{settings.chats_folder_name}' в Telegram"
+            )
+            print(
+                "и добавить в неё чаты, из которых нужно пересылать сообщения, и чаты для пересылки."
+            )
+            await app.stop()
+            return
+
+        SOURCE_CHAT_IDS = list(folder_config.keys())
+        FORWARDING_CONFIG = folder_config
+    else:
+        # Стандартный режим без использования папки
+        # Проверяем, есть ли сохраненная конфигурация
+        has_config, chat_info = load_saved_config()
+
+        # Если конфигурация не найдена или пользователь хочет изменить её
+        if not has_config:
+            await interactive_setup()
+            # После настройки обновляем информацию о чатах
+            chat_info = await validate_chats()
+        else:
+            # Проверяем и обновляем доступ к чатам перед запуском
+            chat_info = await validate_chats()
+
+    # Если нет настроенных чатов, завершаем работу
+    if not SOURCE_CHAT_IDS or not FORWARDING_CONFIG:
+        print("Не настроено ни одной пересылки. Завершение работы.")
+        await app.stop()
+        return
+
+    # Создаем фильтр для отслеживания сообщений только из указанных чатов
+    source_chats_filter = filters.chat(SOURCE_CHAT_IDS)
+
+    # Define a closure to include chat_info
+    def create_handler(chat_info_data):
+        async def handler(client, message):
+            await forward_message(client, message, chat_info_data)
+
+        return handler
+
+    # Регистрируем обработчик для всех входящих сообщений из указанных чатов
+    app.add_handler(
+        MessageHandler(
+            create_handler(chat_info),
+            filters=source_chats_filter,
+        )
+    )
+
+    print("Бот запущен и готов к работе!")
+    print(f"Отслеживаются сообщения из {len(SOURCE_CHAT_IDS)} чатов")
+    print("Нажмите Ctrl+C для завершения работы")
+
+    # Выводим текущую конфигурацию пересылки с дополнительной информацией
+    for source_id, dest_ids in FORWARDING_CONFIG.items():
+        source_info = ""
+        if source_id in chat_info:
+            if "username" in chat_info[source_id]:
+                source_info = f" (@{chat_info[source_id]['username']})"
+            source_info += f" [тип: {chat_info[source_id]['type']}]"
+
+        dest_info = []
+        for dest_id in dest_ids:
+            info = str(dest_id)
+            if dest_id in chat_info:
+                if "username" in chat_info[dest_id]:
+                    info += f" (@{chat_info[dest_id]['username']})"
+                info += f" [тип: {chat_info[dest_id]['type']}]"
+            dest_info.append(info)
+
+        print(f"Из чата {source_id}{source_info} в чаты: {', '.join(dest_info)}")
+
+    # Держим бота запущенным до принудительного завершения
     await idle()
 
     # Корректно останавливаем клиент при завершении работы

@@ -1,8 +1,10 @@
-# check_folder.py
+# check_folder_example.py
 
 import os
+
 from pyrogram import Client
 from pyrogram.raw import functions
+
 from dotenv import load_dotenv
 
 load_dotenv(".env")
@@ -25,6 +27,8 @@ async def check_folder_existence():
             if target_folder:
                 print(f"✅ Папка найдена! ID: {target_folder.id}")
                 print("Включенные чаты:")
+                
+                # ( ! ) важно не забыть, что Чат и Канал встречаются с одним id, но иногда без "-" в начале, но обычно с ним
                 for peer in target_folder.include_peers:
                     if hasattr(peer, "channel_id"):
                         print(f"- Канал: {peer.channel_id}")
@@ -37,7 +41,7 @@ async def check_folder_existence():
             else:
                 print(
                     "❌ Папка не найдена. Создайте папку с именем 'Forward Bot' "
-                    "и добавьте в неё чаты, которые вы хотите отслеживать или те, в которые хотите пересылать данные."
+                    "и добавьте в неё чаты, которые вы хотите отслеживать и те, в которые хотите пересылать данные."
                 )
 
         except Exception as e:
