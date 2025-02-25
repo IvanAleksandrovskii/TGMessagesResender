@@ -196,6 +196,8 @@ async def forward_message(client, message, chat_info=None):
     # Получаем ID чата, из которого пришло сообщение
     source_chat_id = message.chat.id
 
+    print(f"Получено сообщение из чата {source_chat_id}: {message.text}")
+
     # Игнорируем собственные сообщения (если бот запущен под тем же аккаунтом)
     if message.from_user and message.from_user.id == client.me.id:
         print(f"Сообщение в {source_chat_id} проигнорировано (собственное сообщение).")
@@ -443,6 +445,14 @@ async def validate_chats():
     return chat_info
 
 
+# Создаем функцию для включения chat_info
+def create_handler(chat_info_data):
+    async def handler(client, message):
+        await forward_message(client, message, chat_info_data)
+
+    return handler
+
+
 async def main():
     """
     Основная функция для запуска бота.
@@ -474,21 +484,24 @@ async def main():
             await app.stop()
             return
 
-        SOURCE_CHAT_IDS = list(folder_config.keys())
+        # SOURCE_CHAT_IDS = list(folder_config.keys())
         FORWARDING_CONFIG = folder_config
-    else:
-        # Стандартный режим без использования папки
-        # Проверяем, есть ли сохраненная конфигурация
-        has_config, chat_info = load_saved_config()
 
-        # Если конфигурация не найдена или пользователь хочет изменить её
-        if not has_config:
-            await interactive_setup()
-            # После настройки обновляем информацию о чатах
-            chat_info = await validate_chats()
-        else:
-            # Проверяем и обновляем доступ к чатам перед запуском
-            chat_info = await validate_chats()
+        # print("Текущие значения SOURCE_CHAT_IDS:", SOURCE_CHAT_IDS)
+        # print("Текущие значения FORWARDING_CONFIG:", FORWARDING_CONFIG)
+
+    # Стандартный режим без использования папки
+    # Проверяем, есть ли сохраненная конфигурация
+    has_config, chat_info = load_saved_config()
+
+    # Если конфигурация не найдена или пользователь хочет изменить её
+    if not has_config:
+        await interactive_setup()
+        # После настройки обновляем информацию о чатах
+        chat_info = await validate_chats()
+    else:
+        # Проверяем и обновляем доступ к чатам перед запуском
+        chat_info = await validate_chats()
 
     # Если нет настроенных чатов, завершаем работу
     if not SOURCE_CHAT_IDS or not FORWARDING_CONFIG:
@@ -498,15 +511,10 @@ async def main():
 
     # Создаем фильтр для отслеживания сообщений только из указанных чатов
     source_chats_filter = filters.chat(SOURCE_CHAT_IDS)
-
-    # Define a closure to include chat_info
-    def create_handler(chat_info_data):
-        async def handler(client, message):
-            await forward_message(client, message, chat_info_data)
-
-        return handler
+    print("Фильтр для отслеживания сообщений:", SOURCE_CHAT_IDS)
 
     # Регистрируем обработчик для всех входящих сообщений из указанных чатов
+    print("Регистрируем обработчик для всех входящих сообщений из указанных чатов")
     app.add_handler(
         MessageHandler(
             create_handler(chat_info),
