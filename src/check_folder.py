@@ -4,7 +4,6 @@ import json
 import os
 
 from pyrogram.raw import functions
-from pyrogram.errors import FloodWait
 
 from .client import app
 from .config import settings
