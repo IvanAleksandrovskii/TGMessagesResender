@@ -11,7 +11,9 @@ from .check_folder import check_folder_existence
 from .config_manager import load_saved_config
 from .chat_manager import validate_chats, print_current_config
 from .setup_manager import interactive_setup
-from .message_handler import create_handler
+
+# from .message_handler import create_handler
+from .message_handler_from_bot import create_copy_handler
 
 
 # Файл с конфигурацией пересылки бота
@@ -87,9 +89,16 @@ async def main():
 
     # Регистрируем обработчик для всех входящих сообщений из указанных чатов
     print("Регистрируем обработчик для всех входящих сообщений из указанных чатов")
+    # app.add_handler(
+    #     MessageHandler(
+    #         create_handler(chat_info),
+    #         filters=source_chats_filter,
+    #     )
+    # )
+    
     app.add_handler(
         MessageHandler(
-            create_handler(chat_info),
+            create_copy_handler(chat_info),
             filters=source_chats_filter,
         )
     )
