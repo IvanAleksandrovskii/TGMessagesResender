@@ -171,14 +171,14 @@ async def send_forwarding_status(client: Client, original_message: Message, resu
     if not result["errors"]:
         # Все сообщения пересланы успешно
         status_message = (
-            f"✅ Сообщение успешно переслано в {len(result['success'])} чатов."
+            f"✅ Сообщение успешно переслано в чатах: {len(result['success'])} шт."
         )
     else:
         # Некоторые или все пересылки не удалось
         status_message = (
             f"⚠️ Статус пересылки сообщений:\n"
-            f"✅ Сообщение успешно переслано в {len(result['success'])} чатов.\n"
-            f"❌ Не удалось переслать сообщение в {len(result['errors'])} чатов:\n"
+            f"✅ Сообщение успешно переслано в чатов: {len(result['success'])} шт.\n"
+            f"❌ Не удалось переслать сообщение в чатов: {len(result['errors'])} шт.\n"
         )
 
         for chat_id, error in result["errors"].items():
