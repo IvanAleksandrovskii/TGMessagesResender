@@ -18,7 +18,7 @@ async def validate_chats(app, SOURCE_CHAT_IDS, FORWARDING_CONFIG):
     # Словарь для хранения информации о чатах
     chat_info = {}
 
-    # Сначала загружаем все диалоги для кэширования
+    # Предварительно загружаем список диалогов для более надежного доступа
     print("Предварительная загрузка всех доступных диалогов...")
     cached_dialogs = {}
     async for dialog in app.get_dialogs():
@@ -34,12 +34,12 @@ async def validate_chats(app, SOURCE_CHAT_IDS, FORWARDING_CONFIG):
 
     print(f"Загружено {len(cached_dialogs)} диалогов")
 
-    # Собираем все уникальные ID чатов, которые нужно проверить
+    # Собираем все уникальные ID чатов, которые нужно проверять
     all_chat_ids = set(SOURCE_CHAT_IDS)
     for dest_ids in FORWARDING_CONFIG.values():
         all_chat_ids.update(dest_ids)
 
-    # Отслеживаем проблемные чаты
+    # Следим за проблемными чатами
     problematic_chats = set()
 
     # Проверяем все чаты за один проход
@@ -48,7 +48,7 @@ async def validate_chats(app, SOURCE_CHAT_IDS, FORWARDING_CONFIG):
             print(f"Доступ к чату {chat_id} подтвержден (из кэша диалогов)")
         else:
             try:
-                # Попытка получить информацию о чате напрямую, если его нет в диалогах
+                # Пытаемся получить информацию о чате напрямую, если она не находится в диалогах
                 chat = await app.get_chat(chat_id)
                 print(f"Доступ к чату {chat_id} подтвержден (прямой запрос)")
 
@@ -65,10 +65,11 @@ async def validate_chats(app, SOURCE_CHAT_IDS, FORWARDING_CONFIG):
                 problematic_chats.add(chat_id)
 
     if problematic_chats:
-        print(f"Найдено недоступных чатов: {len(problematic_chats)}")
+        print(f"Найдены недоступные чаты: {len(problematic_chats)}")
+        print(f"Недоступные ID чатов: {problematic_chats}")
 
     # Теперь обновляем конфигурацию на основе результатов
-    # Удаляем недоступные исходные чаты
+    # Удаляем недоступные источники чатов
     for source_id in list(SOURCE_CHAT_IDS):
         if source_id in problematic_chats:
             SOURCE_CHAT_IDS.remove(source_id)
@@ -76,22 +77,20 @@ async def validate_chats(app, SOURCE_CHAT_IDS, FORWARDING_CONFIG):
                 del FORWARDING_CONFIG[source_id]
                 print(f"Чат {source_id} удален из конфигурации (недоступен)")
 
-    # Удаляем недоступные чаты назначения
+    # Удаляем недоступные назначения чатов
     for source_id in list(FORWARDING_CONFIG.keys()):
         dest_ids = FORWARDING_CONFIG[source_id]
         for dest_id in list(dest_ids):
             if dest_id in problematic_chats:
                 FORWARDING_CONFIG[source_id].remove(dest_id)
-                print(f"Чат назначения {dest_id} удален из конфигурации (недоступен)")
+                print(f"Чат получателя {dest_id} удален из конфигурации (недоступен)")
 
-        # Если у источника больше нет чатов назначения, удаляем его полностью
+        # Если источник больше нет назначений чатов, удаляем его полностью
         if not FORWARDING_CONFIG[source_id]:
             del FORWARDING_CONFIG[source_id]
             if source_id in SOURCE_CHAT_IDS:
                 SOURCE_CHAT_IDS.remove(source_id)
-            print(
-                f"Исходный чат {source_id} удален из конфигурации (нет доступных чатов назначения)"
-            )
+            print(f"Чат источника {source_id} удален из конфигурации (недоступен)")
 
     # Сохраняем обновленную конфигурацию с информацией о чатах
     save_config(SOURCE_CHAT_IDS, FORWARDING_CONFIG, chat_info)
@@ -109,7 +108,7 @@ def print_current_config(FORWARDING_CONFIG, chat_info):
         if source_id in chat_info:
             if "username" in chat_info[source_id]:
                 source_info = f" (@{chat_info[source_id]['username']})"
-            source_info += f" [тип: {chat_info[source_id]['type']}]"
+            source_info += f" [type: {chat_info[source_id]['type']}]"
 
         dest_info = []
         for dest_id in dest_ids:
@@ -120,4 +119,4 @@ def print_current_config(FORWARDING_CONFIG, chat_info):
                 info += f" [тип: {chat_info[dest_id]['type']}]"
             dest_info.append(info)
 
-        print(f"Из чата {source_id}{source_info} в чаты: {', '.join(dest_info)}")
+        print(f"От чата {source_id}{source_info} в чаты: {', '.join(dest_info)}")
