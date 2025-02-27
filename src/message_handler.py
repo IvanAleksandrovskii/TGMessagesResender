@@ -12,6 +12,7 @@ from pyrogram.errors import (
     UserDeactivated,
     PeerIdInvalid,
 )
+
 # from pyrogram.enums import ChatType
 
 
@@ -26,11 +27,10 @@ async def copy_message_handler(client: Client, message: Message, chat_info=None)
       - FloodWait
       - множественных чатов назначения из FORWARDING_CONFIG.
 
-    Если пользователь (в личном чате) пытается отправить альбом (media_group_id),
+    Если пользователь пытается отправить альбом (media_group_id),
     бот отвечает «Можно прикрепить не более одного файла!» и НЕ пересылает
     (причём только 1 раз на всю группу).
 
-    Если сообщение из группы/канала содержит несколько медиа, бот просто игнорирует.
     Если сообщение из группы/канала одиночное — пересылаем без предупреждений.
     """
     from .app import FORWARDING_CONFIG
@@ -72,8 +72,28 @@ async def copy_message_handler(client: Client, message: Message, chat_info=None)
             )
         return
 
-    # Если сообщение не содержит media_group_id (одиночное сообщение) — пересылаем
+    # Если сообщение не содержит media_group_id (одиночное сообщение)
     dest_chat_ids = FORWARDING_CONFIG[source_chat_id]
+
+    # Отправляем предварительное уведомление о получении сообщения
+    max_estimated_time = (
+        (len(dest_chat_ids) - 1) * 3 if len(dest_chat_ids) > 1 else 0
+    )  # 3 минуты максимум на каждый чат после первого
+
+    try:
+        await client.send_message(
+            chat_id=source_chat_id,
+            text=f"✅ Сообщение получено и будет переслано в чатах: {len(dest_chat_ids)} шт.\n\n"
+            f"⏱️ Максимальное расчетное время отправки: {max_estimated_time} минут.\n\n"
+            f"ℹ️ С большой вероятностью пересылка будет выполнена значительно быстрее. "
+            f"Задержки между отправками добавлены в целях безопасности аккаунта, "
+            f"чтобы избежать подозрений в спам-активность.",
+            reply_to_message_id=message.id,
+        )
+    except Exception as e:
+        print(f"Ошибка при отправке предварительного уведомления: {e}")
+
+    # Пересылаем сообщение
     result = await forward_single_message(client, message, dest_chat_ids)
 
     # Отправляем уведомление о статусе пересылки

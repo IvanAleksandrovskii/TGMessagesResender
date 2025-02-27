@@ -13,7 +13,7 @@ from .chat_manager import validate_chats, print_current_config
 from .setup_manager import interactive_setup
 
 # from .message_handler import create_handler
-from .message_handler_from_bot import create_copy_handler
+from .message_handler import create_copy_handler
 
 
 # Файл с конфигурацией пересылки бота
