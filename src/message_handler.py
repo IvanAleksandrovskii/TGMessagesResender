@@ -1,4 +1,4 @@
-# src/message_handler_from_bot.py
+# src/message_handler.py
 
 import asyncio
 import random
