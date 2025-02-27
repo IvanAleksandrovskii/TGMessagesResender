@@ -185,7 +185,7 @@ async def send_forwarding_status(client: Client, original_message: Message, resu
             status_message += f"- Chat {chat_id}: {error}\n"
 
         if result["errors"]:
-            status_message += "\nЭти чаты могут быть заблокированы или удалены, бот не может получить доступ."
+            status_message += "\nПрочитайте ошибку выше. Если их ошибки не ясна конкретная проблема, эти чаты могут быть заблокированы или удалены, бот не может получить доступ."
 
     try:
         await client.send_message(
