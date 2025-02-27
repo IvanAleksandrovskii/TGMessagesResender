@@ -1,6 +1,7 @@
 # src/message_handler.py
 
 import asyncio
+import random
 
 from pyrogram import Client
 from pyrogram.errors import FloodWait, MessageIdInvalid
@@ -32,12 +33,28 @@ async def fallback_copy(client: Client, message: Message, dest_chat_id, prefix: 
                 # Если copy_media_group не сработал, пробуем копировать по одному
 
         # Если это одиночное сообщение (или copy_media_group не получилось)
-        if message.text:
-            await message.copy(dest_chat_id, text=prefix + message.text)
-        elif message.caption:
-            await message.copy(dest_chat_id, caption=prefix + message.caption)
+        # Для сообщений с медиа используем caption, для текстовых - текст
+        # напрямую отправляем
+        if message.media:
+            # Медиа-сообщение
+            new_caption = prefix + (message.caption or "")
+            await client.copy_message(
+                chat_id=dest_chat_id,
+                from_chat_id=message.chat.id,
+                message_id=message.id,
+                caption=new_caption,
+            )
+        elif message.text:
+            # Текстовое сообщение - используем send_message вместо copy
+            new_text = prefix + message.text
+            await client.send_message(chat_id=dest_chat_id, text=new_text)
         else:
-            await message.copy(dest_chat_id, caption=prefix if message.media else None)
+            # Другие типы сообщений
+            await client.copy_message(
+                chat_id=dest_chat_id,
+                from_chat_id=message.chat.id,
+                message_id=message.id,
+            )
 
         print(
             f"[fallback_copy] Сообщение(я) скопировано в {dest_chat_id} (резервный метод)."
@@ -45,6 +62,28 @@ async def fallback_copy(client: Client, message: Message, dest_chat_id, prefix: 
 
     except Exception as e:
         print(f"[fallback_copy] Не удалось скопировать сообщение в {dest_chat_id}: {e}")
+        # Добавляем более подробный вывод ошибки для отладки
+        print(
+            f"[fallback_copy] Тип сообщения: {'media' if message.media else 'text'}, "
+            f"media_group_id: {message.media_group_id}, "
+            f"text: {bool(message.text)}, caption: {bool(message.caption)}"
+        )
+
+        # Еще один запасной вариант - просто отправить текст
+        try:
+            content = (
+                message.text or message.caption or "Содержимое сообщения недоступно"
+            )
+            await client.send_message(
+                chat_id=dest_chat_id, text=f"{prefix}\n\n{content}"
+            )
+            print(
+                f"[fallback_copy] Последняя попытка: текст отправлен в {dest_chat_id}"
+            )
+        except Exception as final_e:
+            print(
+                f"[fallback_copy] Окончательная ошибка при отправке в {dest_chat_id}: {final_e}"
+            )
 
 
 async def process_media_group_with_delay(
@@ -85,7 +124,16 @@ async def process_media_group_with_delay(
     dest_chat_ids = set(FORWARDING_CONFIG[source_chat_id])
 
     # Пересылаем альбом в каждый чат-получатель
+    first_forwarded = False
     for dest_chat_id in dest_chat_ids:
+        # Добавляем задержку 1-3 секунды между отправками, но не перед первой
+        if first_forwarded:
+            delay_seconds = random.randint(1, 3)
+            print(
+                f"Ожидание {delay_seconds} секунд перед пересылкой медиагруппы {mg_id} в {dest_chat_id}..."
+            )
+            await asyncio.sleep(delay_seconds)
+
         try:
             await client.forward_messages(
                 chat_id=dest_chat_id,
@@ -93,6 +141,7 @@ async def process_media_group_with_delay(
                 message_ids=message_ids,
             )
             print(f"Медиагруппа {mg_id} переслана одним блоком в {dest_chat_id}.")
+            first_forwarded = True
         except FloodWait as fw:
             print(
                 f"FloodWait при отправке медиагруппы {mg_id} -> {dest_chat_id}: ждём {fw.value} секунд."
@@ -107,6 +156,7 @@ async def process_media_group_with_delay(
                 print(
                     f"Медиагруппа {mg_id} переслана в {dest_chat_id} (после FloodWait)."
                 )
+                first_forwarded = True
             except Exception as e:
                 print(
                     f"Ошибка после FloodWait (медиагруппа {mg_id} -> {dest_chat_id}): {e}, резервный метод."
@@ -133,6 +183,7 @@ async def forward_message(client: Client, message: Message, chat_info=None):
     - FloodWait,
     - fallback-копирования (если forward не доступен),
     - множественных чатов назначения из FORWARDING_CONFIG.
+    - задержки 1-3 секунды между отправками (не для первой отправки)
     """
     from .app import FORWARDING_CONFIG  # Ваш глобальный конфиг с пересылками
 
@@ -189,10 +240,20 @@ async def forward_message(client: Client, message: Message, chat_info=None):
 
     # Иначе — одиночное сообщение (без media_group_id). Пересылаем сразу в каждый чат
     dest_chat_ids = set(FORWARDING_CONFIG[source_chat_id])
+    first_forwarded = False
     for dest_chat_id in dest_chat_ids:
+        # Добавляем задержку 1-3 секунды между отправками, но не перед первой
+        if first_forwarded:
+            delay_seconds = random.randint(1, 3)
+            print(
+                f"Ожидание {delay_seconds} секунд перед пересылкой сообщения в {dest_chat_id}..."
+            )
+            await asyncio.sleep(delay_seconds)
+
         try:
             await message.forward(dest_chat_id)
             print(f"Сообщение из {source_chat_id} переслано в {dest_chat_id}")
+            first_forwarded = True
         except FloodWait as fw:
             print(f"FloodWait: ожидание {fw.value} секунд (одиночное сообщение)")
             await asyncio.sleep(fw.value)
@@ -201,6 +262,7 @@ async def forward_message(client: Client, message: Message, chat_info=None):
                 print(
                     f"Сообщение из {source_chat_id} переслано в {dest_chat_id} (после FloodWait)"
                 )
+                first_forwarded = True
             except Exception as e:
                 print(
                     f"Ошибка после FloodWait (одиночное сообщение): {e}, резервный метод"
